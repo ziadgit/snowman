@@ -1,0 +1,1263 @@
+'use client';
+
+import { useState, useRef, useEffect, useCallback } from 'react';
+import dynamic from 'next/dynamic';
+import { 
+  type Emotion, 
+  detectCommand, 
+  getAnimationForInput,
+  getResponseEmotion,
+  parseResponseActions,
+  getPrimaryAction,
+  type ParsedAction,
+} from '@/lib/emotion-mapping';
+import {
+  type TideState,
+  createInitialTideState,
+  calculateXPGain,
+  updateTideState,
+} from '@/lib/tide-system';
+import {
+  type GameState,
+  isWarpSecretCommand,
+  isWarpHomeCommand,
+  detectGameCommand,
+  createInitialGameState,
+  moveRobot,
+  magicMoveToOrb,
+  collectOrb,
+  getCollectableOrb,
+  playWarpSound,
+  playCollectSound,
+  GAME_MESSAGES,
+} from '@/lib/secret-world';
+import { isAstrologyQuery } from '@/lib/astrology-detection';
+import { isNewsQuery } from '@/lib/news-detection';
+import type { RobotControllerRef, QualityLevel } from '@/components/Robot3D';
+import type { SkyIslandRef } from '@/components/SkyIsland';
+import TideProgress from '@/components/TideProgress';
+
+// Dynamic import for the 3D components (client-side only)
+const Robot3D = dynamic(() => import('@/components/Robot3D'), { 
+  ssr: false,
+  loading: () => (
+    <div className="flex items-center justify-center h-full bg-gradient-to-br from-[#1a1a2e] to-[#16213e]">
+      <div className="text-white text-lg animate-pulse">Loading Aquarius...</div>
+    </div>
+  ),
+});
+
+const SkyIsland = dynamic(() => import('@/components/SkyIsland'), {
+  ssr: false,
+  loading: () => (
+    <div className="flex items-center justify-center h-full bg-gradient-to-br from-[#1a0a2e] to-[#0a0a1a]">
+      <div className="text-cyan-300 text-lg animate-pulse">Warping to Sky Island...</div>
+    </div>
+  ),
+});
+
+// Citation from astrology web search
+interface Citation {
+  title: string;
+  url: string;
+  favicon?: string;
+  description?: string;
+}
+
+interface Message {
+  role: 'user' | 'assistant';
+  content: string;
+  displayContent?: string;  // Clean content without actions
+  actions?: ParsedAction[]; // Parsed actions from response
+  emotion?: string;
+  isAstrologyResponse?: boolean; // Whether this came from celestial search
+  isNewsResponse?: boolean; // Whether this came from news search
+  citations?: Citation[]; // Web search citations
+}
+
+// Message bubble component with expandable actions
+function MessageBubble({ message }: { message: Message }) {
+  const [showActions, setShowActions] = useState(false);
+  const [showCitations, setShowCitations] = useState(false);
+  const hasActions = message.actions && message.actions.length > 0;
+  const hasCitations = message.citations && message.citations.length > 0;
+  const displayText = message.displayContent || message.content;
+  
+  return (
+    <div className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+      <div
+        className={`max-w-[80%] rounded-2xl px-4 py-2 ${
+          message.role === 'user'
+            ? 'bg-[#e94560] text-white'
+            : 'bg-[#0f3460] text-gray-100'
+        }`}
+      >
+        {/* Celestial Search indicator */}
+        {message.isAstrologyResponse && (
+          <div className="text-xs text-purple-300 mb-1 flex items-center gap-1">
+            <span>&#10024;</span> Celestial Search
+          </div>
+        )}
+        
+        {/* News Update indicator */}
+        {message.isNewsResponse && (
+          <div className="text-xs text-blue-300 mb-1 flex items-center gap-1">
+            <span>📰</span> News Update
+          </div>
+        )}
+        
+        {message.emotion && (
+          <div className="text-xs opacity-70 mb-1">
+            Feeling: {message.emotion}
+          </div>
+        )}
+        <p className="text-sm">{displayText}</p>
+        
+        {/* Citations section for astrology responses */}
+        {hasCitations && (
+          <div className="mt-2">
+            <button
+              onClick={() => setShowCitations(!showCitations)}
+              className="text-xs text-purple-300 hover:text-purple-200 flex items-center gap-1 transition-colors"
+            >
+              <svg 
+                className={`w-3 h-3 transition-transform ${showCitations ? 'rotate-90' : ''}`} 
+                fill="currentColor" 
+                viewBox="0 0 20 20"
+              >
+                <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
+              </svg>
+              {message.citations!.length} source{message.citations!.length > 1 ? 's' : ''}
+            </button>
+            
+            {showCitations && (
+              <div className="mt-2 space-y-2 border-t border-purple-500/20 pt-2">
+                {message.citations!.map((citation, i) => (
+                  <a 
+                    key={i}
+                    href={citation.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block text-xs text-purple-200 hover:text-purple-100 transition-colors"
+                  >
+                    <div className="flex items-center gap-2">
+                      {citation.favicon && (
+                        <img 
+                          src={citation.favicon} 
+                          alt="" 
+                          className="w-4 h-4 rounded"
+                          onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                        />
+                      )}
+                      <span className="underline">{citation.title}</span>
+                    </div>
+                    {citation.description && (
+                      <p className="mt-1 opacity-70 line-clamp-2">{citation.description}</p>
+                    )}
+                  </a>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        
+        {/* Actions indicator and expandable section */}
+        {hasActions && (
+          <div className="mt-2">
+            <button
+              onClick={() => setShowActions(!showActions)}
+              className="text-xs opacity-60 hover:opacity-100 flex items-center gap-1 transition-opacity"
+            >
+              <svg 
+                className={`w-3 h-3 transition-transform ${showActions ? 'rotate-90' : ''}`} 
+                fill="currentColor" 
+                viewBox="0 0 20 20"
+              >
+                <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
+              </svg>
+              {message.actions!.length} action{message.actions!.length > 1 ? 's' : ''}
+            </button>
+            
+            {showActions && (
+              <div className="mt-2 space-y-1 border-t border-white/10 pt-2">
+                {message.actions!.map((action, i) => (
+                  <div 
+                    key={i} 
+                    className="text-xs opacity-70 italic flex items-center gap-2"
+                  >
+                    <span 
+                      className="w-2 h-2 rounded-full flex-shrink-0"
+                      style={{ backgroundColor: action.emotionGlow || '#9e9e9e' }}
+                    />
+                    <span>*{action.text}*</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default function Home() {
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isRealtimeConnecting, setIsRealtimeConnecting] = useState(false);
+  const [isRealtimeConnected, setIsRealtimeConnected] = useState(false);
+  const [currentEmotion, setCurrentEmotion] = useState<Emotion | null>(null);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [quality, setQuality] = useState<QualityLevel>('medium');
+  
+  // Mindful XP System - The Flowing Tide
+  const [tideState, setTideState] = useState<TideState>(createInitialTideState());
+  const [tideAnimating, setTideAnimating] = useState(false);
+  
+  // Secret World - Sky Island
+  const [currentWorld, setCurrentWorld] = useState<'main' | 'skyIsland'>('main');
+  const [gameState, setGameState] = useState<GameState | null>(null);
+  const [isFading, setIsFading] = useState(false);
+  const [fadeDirection, setFadeDirection] = useState<'in' | 'out'>('in');
+  
+  const robotRef = useRef<RobotControllerRef>(null);
+  const skyIslandRef = useRef<SkyIslandRef>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const realtimePeerRef = useRef<RTCPeerConnection | null>(null);
+  const realtimeDataChannelRef = useRef<RTCDataChannel | null>(null);
+  const realtimeMediaStreamRef = useRef<MediaStream | null>(null);
+  const realtimeRemoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const realtimeAssistantTranscriptRef = useRef('');
+  
+  // Refs to avoid stale closures in async callbacks (voice transcription)
+  const currentWorldRef = useRef(currentWorld);
+  const gameStateRef = useRef(gameState);
+
+  // Scroll to bottom when messages change
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  // Keep refs in sync with state (for async callbacks like voice transcription)
+  useEffect(() => {
+    currentWorldRef.current = currentWorld;
+  }, [currentWorld]);
+  
+  useEffect(() => {
+    gameStateRef.current = gameState;
+  }, [gameState]);
+
+  // Initialize audio element
+  useEffect(() => {
+    audioRef.current = new Audio();
+    audioRef.current.onended = () => setIsSpeaking(false);
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+    };
+  }, []);
+
+  const stopRealtimeSession = useCallback(() => {
+    realtimeDataChannelRef.current?.close();
+    realtimeDataChannelRef.current = null;
+
+    realtimePeerRef.current?.getSenders().forEach((sender) => {
+      sender.track?.stop();
+    });
+    realtimePeerRef.current?.close();
+    realtimePeerRef.current = null;
+
+    realtimeMediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    realtimeMediaStreamRef.current = null;
+
+    if (realtimeRemoteAudioRef.current) {
+      realtimeRemoteAudioRef.current.pause();
+      realtimeRemoteAudioRef.current.srcObject = null;
+      realtimeRemoteAudioRef.current = null;
+    }
+
+    realtimeAssistantTranscriptRef.current = '';
+    setIsRecording(false);
+    setIsSpeaking(false);
+    setIsRealtimeConnected(false);
+    setIsRealtimeConnecting(false);
+    setIsLoading(false);
+  }, []);
+
+  useEffect(() => stopRealtimeSession, [stopRealtimeSession]);
+
+  // Speak text using OpenAI Audio Speech
+  const speakText = useCallback(async (text: string, emotion?: string) => {
+    if (!voiceEnabled) return;
+    
+    try {
+      setIsSpeaking(true);
+      const response = await fetch('/api/speak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, emotion }),
+      });
+
+      if (response.ok) {
+        const audioBlob = await response.blob();
+        const audioUrl = URL.createObjectURL(audioBlob);
+        
+        if (audioRef.current) {
+          audioRef.current.src = audioUrl;
+          await audioRef.current.play();
+        }
+      } else {
+        const errorData = await response.json().catch(() => ({}));
+        console.error('Speech API error:', response.status, errorData);
+        setIsSpeaking(false);
+      }
+    } catch (error) {
+      console.error('Speech error:', error);
+      setIsSpeaking(false);
+    }
+  }, [voiceEnabled]);
+
+  // Handle robot animation based on emotion and command
+  const animateRobot = useCallback((emotion: Emotion | null, text: string) => {
+    const command = detectCommand(text);
+    const mapping = getAnimationForInput(emotion, command);
+    
+    if (robotRef.current) {
+      // Queue the animation with 7 second duration
+      robotRef.current.queueAnimation(mapping, 7000);
+      robotRef.current.playQueueThenIdle();
+      
+      if (mapping.movement && mapping.movement !== 'none') {
+        robotRef.current.startMovement(mapping.movement);
+      } else {
+        robotRef.current.stopMovement();
+      }
+    }
+  }, []);
+
+  const applyAssistantAnimation = useCallback((text: string, emotion: Emotion | null = null) => {
+    const parsed = parseResponseActions(text);
+    const primaryAction = getPrimaryAction(parsed.actions);
+
+    if (primaryAction) {
+      if (robotRef.current) {
+        robotRef.current.queueAnimation({
+          animation: primaryAction.animation,
+          emotionGlow: primaryAction.emotionGlow,
+        }, 7000);
+        robotRef.current.playQueueThenIdle();
+        robotRef.current.stopMovement();
+      }
+      return parsed;
+    }
+
+    const responseEmotion = emotion ? getResponseEmotion(emotion) : 'neutral';
+    const responseMapping = getAnimationForInput(responseEmotion as Emotion, null);
+
+    if (robotRef.current) {
+      robotRef.current.queueAnimation(responseMapping, 7000);
+      robotRef.current.playQueueThenIdle();
+      robotRef.current.stopMovement();
+    }
+
+    return parsed;
+  }, []);
+
+  // Warp to Sky Island
+  const warpToSkyIsland = useCallback(() => {
+    playWarpSound();
+    setIsFading(true);
+    setFadeDirection('in');
+    
+    setTimeout(() => {
+      setCurrentWorld('skyIsland');
+      setGameState(createInitialGameState());
+      setFadeDirection('out');
+      
+      setTimeout(() => {
+        setIsFading(false);
+        // Send welcome message
+        const welcomeMessage: Message = {
+          role: 'assistant',
+          content: GAME_MESSAGES.welcome,
+          displayContent: GAME_MESSAGES.welcome,
+        };
+        setMessages(prev => [...prev, welcomeMessage]);
+        speakText(GAME_MESSAGES.welcome, 'excited');
+      }, 300);
+    }, 300);
+  }, [speakText]);
+
+  // Warp back home
+  const warpHome = useCallback(() => {
+    playWarpSound();
+    setIsFading(true);
+    setFadeDirection('in');
+    
+    setTimeout(() => {
+      setCurrentWorld('main');
+      setGameState(null);
+      setFadeDirection('out');
+      
+      setTimeout(() => {
+        setIsFading(false);
+        const returnMessage: Message = {
+          role: 'assistant',
+          content: GAME_MESSAGES.returnHome,
+          displayContent: GAME_MESSAGES.returnHome,
+        };
+        setMessages(prev => [...prev, returnMessage]);
+        speakText(GAME_MESSAGES.returnHome, 'calm');
+      }, 300);
+    }, 300);
+  }, [speakText]);
+
+  // Handle game commands in Sky Island
+  const handleGameCommand = useCallback((text: string) => {
+    if (!gameState) return false;
+    
+    const command = detectGameCommand(text);
+    if (!command) return false;
+    
+    let newGameState = gameState;
+    let responseMessage = '';
+    
+    switch (command) {
+      case 'left':
+      case 'right':
+      case 'forward':
+      case 'back':
+        newGameState = moveRobot(gameState, command);
+        responseMessage = GAME_MESSAGES.moving;
+        if (skyIslandRef.current) {
+          skyIslandRef.current.playAnimation('a_Walking');
+        }
+        break;
+        
+      case 'magic':
+        newGameState = magicMoveToOrb(gameState);
+        responseMessage = GAME_MESSAGES.magic;
+        if (skyIslandRef.current) {
+          skyIslandRef.current.playAnimation('a_Walking');
+        }
+        break;
+        
+      case 'collect':
+        const collectableOrb = getCollectableOrb(gameState);
+        if (collectableOrb) {
+          newGameState = collectOrb(gameState, collectableOrb.id);
+          playCollectSound();
+          
+          if (newGameState.completed) {
+            responseMessage = GAME_MESSAGES.allCollected;
+            // Award XP bonus
+            const newTideState = updateTideState(tideState, 50, 'excited');
+            setTideState(newTideState);
+            setTideAnimating(true);
+            setTimeout(() => setTideAnimating(false), 700);
+            
+            if (skyIslandRef.current) {
+              skyIslandRef.current.celebrateVictory();
+            }
+          } else {
+            responseMessage = GAME_MESSAGES.collected;
+            // Check if near another orb
+            const nextOrb = getCollectableOrb(newGameState);
+            if (nextOrb) {
+              responseMessage += ' ' + GAME_MESSAGES.nearOrb;
+            }
+          }
+        } else {
+          responseMessage = GAME_MESSAGES.noOrbs;
+        }
+        break;
+    }
+    
+    setGameState(newGameState);
+    
+    // Check if near an orb after moving
+    if (['left', 'right', 'forward', 'back', 'magic'].includes(command)) {
+      const nearbyOrb = getCollectableOrb(newGameState);
+      if (nearbyOrb) {
+        responseMessage = GAME_MESSAGES.nearOrb;
+      }
+    }
+    
+    if (responseMessage) {
+      const assistantMessage: Message = {
+        role: 'assistant',
+        content: responseMessage,
+        displayContent: responseMessage,
+      };
+      setMessages(prev => [...prev, assistantMessage]);
+      speakText(responseMessage, 'happy');
+    }
+    
+    return true;
+  }, [gameState, tideState, speakText]);
+
+  // Send message to chat API
+  const sendMessage = async (text: string, emotion: Emotion | null = null) => {
+    if (!text.trim() || isLoading) return;
+
+    // Check for warp commands first (highest priority)
+    if (isWarpSecretCommand(text)) {
+      const userMessage: Message = { role: 'user', content: text };
+      setMessages(prev => [...prev, userMessage]);
+      setInput('');
+      warpToSkyIsland();
+      return;
+    }
+    
+    // Use refs to get fresh state values (avoids stale closures in async callbacks)
+    const currentWorldValue = currentWorldRef.current;
+    const gameStateValue = gameStateRef.current;
+    
+    if (isWarpHomeCommand(text) && currentWorldValue === 'skyIsland') {
+      const userMessage: Message = { role: 'user', content: text };
+      setMessages(prev => [...prev, userMessage]);
+      setInput('');
+      warpHome();
+      return;
+    }
+    
+    // Handle game commands when in Sky Island
+    if (currentWorldValue === 'skyIsland' && gameStateValue) {
+      const userMessage: Message = { role: 'user', content: text };
+      setMessages(prev => [...prev, userMessage]);
+      setInput('');
+      
+      const handled = handleGameCommand(text);
+      if (handled) return;
+      
+      // If not a game command, still allow chat but with a game-aware response
+    }
+
+    const userMessage: Message = { 
+      role: 'user', 
+      content: text,
+      emotion: emotion || undefined,
+    };
+    
+    setMessages(prev => [...prev, userMessage]);
+    setInput('');
+    setIsLoading(true);
+
+    // Animate robot based on user's emotion and potential commands
+    animateRobot(emotion, text);
+    
+    // Update tide XP - reward engagement and emotional expression
+    const command = detectCommand(text);
+    const { xpGained } = calculateXPGain(tideState, emotion, text, !!command);
+    if (xpGained > 0) {
+      const newTideState = updateTideState(tideState, xpGained, emotion);
+      setTideState(newTideState);
+      
+      // Trigger animation on XP gain
+      setTideAnimating(true);
+      setTimeout(() => setTideAnimating(false), 700);
+    }
+
+    try {
+      // Check if this is an astrology or news query
+      // Priority: Astrology > News > Regular chat
+      const isAstrology = isAstrologyQuery(text);
+      const isNews = !isAstrology && isNewsQuery(text);
+      
+      let assistantMessage: Message;
+      
+      if (isAstrology) {
+        // Use the astrology agent for celestial queries
+        try {
+          const response = await fetch('/api/astrology', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: text }),
+          });
+
+          const data = await response.json();
+          
+          if (data.fallback || !data.content) {
+            // Fallback to regular chat if astrology API fails
+            throw new Error('Astrology API fallback triggered');
+          }
+          
+          assistantMessage = {
+            role: 'assistant',
+            content: data.content,
+            displayContent: data.content,
+            isAstrologyResponse: true,
+            citations: data.citations || [],
+          };
+          
+          setMessages(prev => [...prev, assistantMessage]);
+          
+          // Mystical animation for astrology responses
+          if (robotRef.current) {
+            robotRef.current.queueAnimation({
+              animation: 'Wave',
+              emotionGlow: '#9b59b6', // Purple for mystical
+            }, 7000);
+            robotRef.current.playQueueThenIdle();
+            robotRef.current.stopMovement();
+          }
+          
+          // Speak the response
+          speakText(data.content, 'serene');
+        } catch (astrologyError) {
+          console.warn('Astrology API failed, falling back to regular chat:', astrologyError);
+          // Fall through to regular chat below
+          const response = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              messages: [...messages, userMessage].map(m => ({
+                role: m.role,
+                content: m.content,
+              })),
+              userEmotion: emotion,
+            }),
+          });
+
+          const data = await response.json();
+          
+          if (data.content) {
+            const parsed = parseResponseActions(data.content);
+            
+            assistantMessage = {
+              role: 'assistant',
+              content: data.content,
+              displayContent: parsed.displayText,
+              actions: parsed.actions,
+            };
+            setMessages(prev => [...prev, assistantMessage]);
+
+            const primaryAction = getPrimaryAction(parsed.actions);
+            if (primaryAction) {
+              if (robotRef.current) {
+                robotRef.current.queueAnimation({
+                  animation: primaryAction.animation,
+                  emotionGlow: primaryAction.emotionGlow,
+                }, 7000);
+                robotRef.current.playQueueThenIdle();
+                robotRef.current.stopMovement();
+              }
+            } else {
+              const responseEmotion = emotion ? getResponseEmotion(emotion) : 'neutral';
+              const responseMapping = getAnimationForInput(responseEmotion as Emotion, null);
+              
+              if (robotRef.current) {
+                robotRef.current.queueAnimation(responseMapping, 7000);
+                robotRef.current.playQueueThenIdle();
+                robotRef.current.stopMovement();
+              }
+            }
+
+            const responseEmotion = emotion ? getResponseEmotion(emotion) : 'neutral';
+            speakText(parsed.spokenText, responseEmotion);
+          }
+        }
+      } else if (isNews) {
+        // Use the news agent for current events queries
+        try {
+          const response = await fetch('/api/news', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: text }),
+          });
+
+          const data = await response.json();
+          
+          console.log('News API response in frontend:', { content: data.content?.slice(0, 50), citations: data.citations });
+          
+          if (data.fallback || !data.content) {
+            // Fallback to regular chat if news API fails
+            throw new Error('News API fallback triggered');
+          }
+          
+          assistantMessage = {
+            role: 'assistant',
+            content: data.content,
+            displayContent: data.content,
+            isNewsResponse: true,
+            citations: data.citations || [],
+          };
+          
+          setMessages(prev => [...prev, assistantMessage]);
+          
+          // Calm animation for news responses
+          if (robotRef.current) {
+            robotRef.current.queueAnimation({
+              animation: 'Idle',
+              emotionGlow: '#3498db', // Blue for news
+            }, 7000);
+            robotRef.current.playQueueThenIdle();
+            robotRef.current.stopMovement();
+          }
+          
+          // Speak the response
+          speakText(data.content, 'calm');
+        } catch (newsError) {
+          console.warn('News API failed, falling back to regular chat:', newsError);
+          // Fall through to regular chat below
+          const response = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              messages: [...messages, userMessage].map(m => ({
+                role: m.role,
+                content: m.content,
+              })),
+              userEmotion: emotion,
+            }),
+          });
+
+          const data = await response.json();
+          
+          if (data.content) {
+            const parsed = parseResponseActions(data.content);
+            
+            assistantMessage = {
+              role: 'assistant',
+              content: data.content,
+              displayContent: parsed.displayText,
+              actions: parsed.actions,
+            };
+            setMessages(prev => [...prev, assistantMessage]);
+
+            const primaryAction = getPrimaryAction(parsed.actions);
+            if (primaryAction) {
+              if (robotRef.current) {
+                robotRef.current.queueAnimation({
+                  animation: primaryAction.animation,
+                  emotionGlow: primaryAction.emotionGlow,
+                }, 7000);
+                robotRef.current.playQueueThenIdle();
+                robotRef.current.stopMovement();
+              }
+            } else {
+              const responseEmotion = emotion ? getResponseEmotion(emotion) : 'neutral';
+              const responseMapping = getAnimationForInput(responseEmotion as Emotion, null);
+              
+              if (robotRef.current) {
+                robotRef.current.queueAnimation(responseMapping, 7000);
+                robotRef.current.playQueueThenIdle();
+                robotRef.current.stopMovement();
+              }
+            }
+
+            const responseEmotion = emotion ? getResponseEmotion(emotion) : 'neutral';
+            speakText(parsed.spokenText, responseEmotion);
+          }
+        }
+      } else {
+        // Regular chat for non-astrology queries
+        const response = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messages: [...messages, userMessage].map(m => ({
+              role: m.role,
+              content: m.content,
+            })),
+            userEmotion: emotion,
+          }),
+        });
+
+        const data = await response.json();
+        
+        if (data.content) {
+          // Parse the response to extract actions
+          const parsed = parseResponseActions(data.content);
+          
+          assistantMessage = {
+            role: 'assistant',
+            content: data.content,
+            displayContent: parsed.displayText,
+            actions: parsed.actions,
+          };
+          setMessages(prev => [...prev, assistantMessage]);
+
+          // If there are parsed actions, use the primary action for animation
+            const primaryAction = getPrimaryAction(parsed.actions);
+            if (primaryAction) {
+              if (robotRef.current) {
+                robotRef.current.queueAnimation({
+                  animation: primaryAction.animation,
+                  emotionGlow: primaryAction.emotionGlow,
+                }, 7000);
+                robotRef.current.playQueueThenIdle();
+                robotRef.current.stopMovement();
+              }
+          } else {
+            // Fall back to emotion-based animation
+            const responseEmotion = emotion ? getResponseEmotion(emotion) : 'neutral';
+            const responseMapping = getAnimationForInput(responseEmotion as Emotion, null);
+            
+            if (robotRef.current) {
+              robotRef.current.queueAnimation(responseMapping, 7000);
+              robotRef.current.playQueueThenIdle();
+              robotRef.current.stopMovement();
+            }
+          }
+
+          // Speak the clean response (without action text)
+          const responseEmotion = emotion ? getResponseEmotion(emotion) : 'neutral';
+          speakText(parsed.spokenText, responseEmotion);
+        }
+      }
+    } catch (error) {
+      console.error('Chat error:', error);
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: 'Sorry, I had trouble processing that. Please try again!',
+      }]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const waitForIceGathering = async (pc: RTCPeerConnection) => {
+    if (pc.iceGatheringState === 'complete') return;
+
+    await new Promise<void>((resolve) => {
+      const onStateChange = () => {
+        if (pc.iceGatheringState === 'complete') {
+          pc.removeEventListener('icegatheringstatechange', onStateChange);
+          resolve();
+        }
+      };
+
+      pc.addEventListener('icegatheringstatechange', onStateChange);
+    });
+  };
+
+  const handleRealtimeServerEvent = useCallback((event: Record<string, unknown>) => {
+    switch (event.type) {
+      case 'input_audio_buffer.speech_started':
+        setIsRecording(true);
+        break;
+      case 'input_audio_buffer.speech_stopped':
+        setIsRecording(false);
+        break;
+      case 'conversation.item.input_audio_transcription.completed': {
+        const transcript = typeof event.transcript === 'string' ? event.transcript.trim() : '';
+        if (!transcript) break;
+
+        setMessages(prev => [...prev, {
+          role: 'user',
+          content: transcript,
+        }]);
+        animateRobot(null, transcript);
+        break;
+      }
+      case 'response.created':
+        setIsLoading(true);
+        setIsSpeaking(true);
+        realtimeAssistantTranscriptRef.current = '';
+        break;
+      case 'response.output_audio_transcript.delta':
+        if (typeof event.delta === 'string') {
+          realtimeAssistantTranscriptRef.current += event.delta;
+        }
+        break;
+      case 'response.output_audio_transcript.done': {
+        const transcript = (
+          typeof event.transcript === 'string'
+            ? event.transcript
+            : realtimeAssistantTranscriptRef.current
+        ).trim();
+
+        if (!transcript) break;
+
+        const parsed = applyAssistantAnimation(transcript);
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: transcript,
+          displayContent: parsed.displayText,
+          actions: parsed.actions,
+        }]);
+        realtimeAssistantTranscriptRef.current = '';
+        break;
+      }
+      case 'response.done':
+        setIsLoading(false);
+        setIsSpeaking(false);
+        break;
+      case 'error':
+        console.error('Realtime API error:', event);
+        setIsLoading(false);
+        setIsSpeaking(false);
+        break;
+    }
+  }, [animateRobot, applyAssistantAnimation]);
+
+  const startRealtimeSession = useCallback(async () => {
+    if (realtimePeerRef.current || isRealtimeConnecting) return;
+
+    setIsRealtimeConnecting(true);
+
+    try {
+      const pc = new RTCPeerConnection();
+      realtimePeerRef.current = pc;
+
+      const remoteAudio = document.createElement('audio');
+      remoteAudio.autoplay = true;
+      realtimeRemoteAudioRef.current = remoteAudio;
+      pc.ontrack = (event) => {
+        remoteAudio.srcObject = event.streams[0];
+        void remoteAudio.play().catch((error) => {
+          console.warn('Realtime audio playback blocked:', error);
+        });
+      };
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      realtimeMediaStreamRef.current = stream;
+      stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+
+      const dataChannel = pc.createDataChannel('oai-events');
+      realtimeDataChannelRef.current = dataChannel;
+      dataChannel.addEventListener('open', () => {
+        setIsRealtimeConnected(true);
+        setIsRealtimeConnecting(false);
+      });
+      dataChannel.addEventListener('close', () => {
+        setIsRealtimeConnected(false);
+        setIsRecording(false);
+      });
+      dataChannel.addEventListener('message', (message) => {
+        try {
+          handleRealtimeServerEvent(JSON.parse(message.data));
+        } catch (error) {
+          console.error('Failed to parse Realtime event:', error);
+        }
+      });
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await waitForIceGathering(pc);
+
+      const sdp = pc.localDescription?.sdp;
+      if (!sdp) {
+        throw new Error('Failed to create local SDP offer');
+      }
+
+      const response = await fetch('/api/realtime/call', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/sdp',
+        },
+        body: sdp,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || 'Failed to create Realtime session');
+      }
+
+      await pc.setRemoteDescription({
+        type: 'answer',
+        sdp: await response.text(),
+      });
+    } catch (error) {
+      console.error('Realtime connection error:', error);
+      stopRealtimeSession();
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: 'Sorry, I had trouble starting live voice. Please try again.',
+      }]);
+    }
+  }, [handleRealtimeServerEvent, isRealtimeConnecting, stopRealtimeSession]);
+
+  const toggleRecording = async () => {
+    if (isRealtimeConnected || isRealtimeConnecting) {
+      stopRealtimeSession();
+      return;
+    }
+
+    await startRealtimeSession();
+  };
+
+  // Handle form submit
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    sendMessage(input, currentEmotion);
+    setCurrentEmotion(null);
+  };
+
+  return (
+    <div className="flex h-screen bg-[#1a1a2e]">
+      {/* Warp Transition Overlay */}
+      {isFading && (
+        <div 
+          className={`fixed inset-0 bg-white z-50 transition-opacity duration-300 ${
+            fadeDirection === 'in' ? 'opacity-100' : 'opacity-0'
+          }`}
+        />
+      )}
+      
+      {/* 3D Robot Viewer / Sky Island */}
+      <div className="flex-1 relative">
+        {currentWorld === 'main' ? (
+          <Robot3D ref={robotRef} className="w-full h-full" quality={quality} />
+        ) : (
+          gameState && <SkyIsland ref={skyIslandRef} gameState={gameState} className="w-full h-full" />
+        )}
+        
+        {/* Emotion indicator */}
+        {currentEmotion && (
+          <div className="absolute top-4 left-4 px-3 py-1 bg-[#e94560] text-white rounded-full text-sm font-medium">
+            Detected: {currentEmotion}
+          </div>
+        )}
+        
+        {/* Speaking indicator */}
+        {isSpeaking && (
+          <div className="absolute top-4 right-4 px-3 py-1 bg-[#4caf50] text-white rounded-full text-sm font-medium animate-pulse">
+            {isRealtimeConnected ? 'Realtime voice' : 'Speaking...'}
+          </div>
+        )}
+        
+        {/* Sky Island Game UI */}
+        {currentWorld === 'skyIsland' && gameState && (
+          <div className="absolute top-4 left-4 flex flex-col gap-2">
+            {/* Orb counter */}
+            <div className="px-4 py-2 bg-[#1a0a2e]/90 backdrop-blur-sm rounded-lg border border-cyan-500/30">
+              <div className="text-cyan-300 text-sm font-medium flex items-center gap-2">
+                <span className="text-lg">✨</span>
+                Orbs: {gameState.orbsCollected} / {gameState.totalOrbs}
+              </div>
+              {gameState.completed && (
+                <div className="text-yellow-300 text-xs mt-1 animate-pulse">
+                  All collected! +50 XP
+                </div>
+              )}
+            </div>
+            
+            {/* Game hint */}
+            <div className="px-3 py-1.5 bg-[#1a0a2e]/70 backdrop-blur-sm rounded-lg text-xs text-gray-300 max-w-[200px]">
+              Say: &ldquo;magic&rdquo; to find orbs, &ldquo;collect&rdquo; when near
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Chat Sidebar */}
+      <div className="w-[400px] bg-[#16213e] flex flex-col border-l border-[#0f3460]">
+        {/* Header */}
+        <div className="p-4 border-b border-[#0f3460]">
+          <h1 className="text-2xl font-bold text-[#e94560]">Aquarius</h1>
+          <p className="text-gray-400 text-sm">A fin-astral companion that helps you feel fine</p>
+          
+          {/* Tide Progress - Mindful XP Visualization */}
+          <TideProgress 
+            percentage={tideState.percentage}
+            statusPhrase={tideState.statusPhrase}
+            isAnimating={tideAnimating}
+            showFullTideCelebration={tideState.reachedFullTide}
+          />
+          
+          <div className="mt-3 flex flex-col gap-2">
+            {/* Quality selector */}
+            <div className="flex items-center gap-2">
+              <label htmlFor="quality-select" className="text-gray-400 text-sm">
+                Graphics:
+              </label>
+              <select
+                id="quality-select"
+                value={quality}
+                onChange={(e) => setQuality(e.target.value as QualityLevel)}
+                className="bg-[#0f3460] text-gray-200 text-sm rounded px-2 py-1 outline-none focus:ring-1 focus:ring-[#e94560]"
+              >
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+              </select>
+            </div>
+            
+            {/* Voice toggle */}
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="voice-toggle"
+                checked={voiceEnabled}
+                onChange={(e) => setVoiceEnabled(e.target.checked)}
+                className="w-4 h-4 accent-[#e94560]"
+              />
+              <label htmlFor="voice-toggle" className="text-gray-400 text-sm cursor-pointer">
+                OpenAI voice responses
+              </label>
+            </div>
+            {isRealtimeConnected && (
+              <div className="text-xs text-green-300">
+                Live Realtime voice connected
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Messages */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {messages.length === 0 && (
+            <div className="text-center text-gray-500 mt-8">
+              <p className="text-lg mb-2">Say hello to Aquarius!</p>
+              <p className="text-sm">Try voice commands like &ldquo;wave&rdquo;, &ldquo;jump&rdquo;, or &ldquo;dance&rdquo;</p>
+              <p className="text-sm mt-1">Your emotional tone affects how Aquarius responds</p>
+            </div>
+          )}
+          
+          {messages.map((message, index) => (
+            <MessageBubble key={index} message={message} />
+          ))}
+          
+          {isLoading && (
+            <div className="flex justify-start">
+              <div className="bg-[#0f3460] text-gray-100 rounded-2xl px-4 py-2">
+                <p className="text-sm animate-pulse">Thinking...</p>
+              </div>
+            </div>
+          )}
+          
+          <div ref={messagesEndRef} />
+        </div>
+
+        {/* Input Area */}
+        <div className="p-4 border-t border-[#0f3460]">
+          <form onSubmit={handleSubmit} className="flex gap-2">
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="Type a message..."
+              className="flex-1 bg-[#0f3460] text-white rounded-full px-4 py-2 outline-none focus:ring-2 focus:ring-[#e94560] placeholder-gray-500"
+              disabled={isLoading || isRealtimeConnecting}
+            />
+            
+            {/* Voice Record Button */}
+            <button
+              type="button"
+              onClick={toggleRecording}
+              disabled={isRealtimeConnecting}
+              title={isRealtimeConnected ? 'Stop live voice' : 'Start live voice'}
+              className={`w-10 h-10 rounded-full flex items-center justify-center transition-all ${
+                isRecording
+                  ? 'bg-red-500 animate-pulse'
+                  : isRealtimeConnecting
+                  ? 'bg-yellow-500'
+                  : isRealtimeConnected
+                  ? 'bg-green-600 hover:bg-green-500'
+                  : 'bg-[#0f3460] hover:bg-[#1a4a7a]'
+              }`}
+            >
+              {isRealtimeConnecting ? (
+                <svg className="w-5 h-5 text-white animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                </svg>
+              ) : (
+                <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1 1.93c-3.94-.49-7-3.85-7-7.93h2c0 3.31 2.69 6 6 6s6-2.69 6-6h2c0 4.08-3.06 7.44-7 7.93V20h4v2H8v-2h4v-4.07z" />
+                </svg>
+              )}
+            </button>
+            
+            {/* Send Button */}
+            <button
+              type="submit"
+              disabled={isLoading || isRealtimeConnecting || !input.trim()}
+              className="w-10 h-10 rounded-full bg-[#e94560] flex items-center justify-center hover:bg-[#ff6b6b] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+              </svg>
+            </button>
+          </form>
+          
+          {/* Quick Commands */}
+          <div className="mt-3 flex flex-wrap gap-2">
+            {currentWorld === 'main' ? (
+              <>
+                {['wave', 'jump', 'dance', 'walk'].map((cmd) => (
+                  <button
+                    key={cmd}
+                    onClick={() => sendMessage(cmd)}
+                    disabled={isLoading}
+                    className="px-3 py-1 text-xs bg-[#0f3460] text-gray-300 rounded-full hover:bg-[#1a4a7a] transition-colors capitalize"
+                  >
+                    {cmd}
+                  </button>
+                ))}
+                {/* Celestial Search Test Button */}
+                <button
+                  onClick={() => sendMessage("What's happening with mercury retrograde right now in 2026?")}
+                  disabled={isLoading}
+                  className="px-3 py-1 text-xs bg-purple-900 text-purple-200 rounded-full hover:bg-purple-800 transition-colors flex items-center gap-1"
+                >
+                  <span>&#10024;</span> Celestial
+                </button>
+                {/* News Update Button */}
+                <button
+                  onClick={() => sendMessage("What's happening in the news today?")}
+                  disabled={isLoading}
+                  className="px-3 py-1 text-xs bg-blue-900 text-blue-200 rounded-full hover:bg-blue-800 transition-colors flex items-center gap-1"
+                >
+                  <span>📰</span> News
+                </button>
+                {/* Secret World Button */}
+                <button
+                  onClick={() => sendMessage("warp secret")}
+                  disabled={isLoading}
+                  className="px-3 py-1 text-xs bg-cyan-900 text-cyan-200 rounded-full hover:bg-cyan-800 transition-colors flex items-center gap-1"
+                >
+                  <span>🏝️</span> Secret
+                </button>
+              </>
+            ) : (
+              <>
+                {/* Sky Island Commands */}
+                <button
+                  onClick={() => sendMessage("magic")}
+                  disabled={isLoading}
+                  className="px-3 py-1 text-xs bg-cyan-800 text-cyan-100 rounded-full hover:bg-cyan-700 transition-colors flex items-center gap-1"
+                >
+                  ✨ Magic
+                </button>
+                <button
+                  onClick={() => sendMessage("collect")}
+                  disabled={isLoading}
+                  className="px-3 py-1 text-xs bg-yellow-800 text-yellow-100 rounded-full hover:bg-yellow-700 transition-colors flex items-center gap-1"
+                >
+                  🔮 Collect
+                </button>
+                {['left', 'right', 'forward'].map((dir) => (
+                  <button
+                    key={dir}
+                    onClick={() => sendMessage(`go ${dir}`)}
+                    disabled={isLoading}
+                    className="px-3 py-1 text-xs bg-[#0f3460] text-gray-300 rounded-full hover:bg-[#1a4a7a] transition-colors capitalize"
+                  >
+                    {dir}
+                  </button>
+                ))}
+                {/* Return Home Button */}
+                <button
+                  onClick={() => sendMessage("warp home")}
+                  disabled={isLoading}
+                  className="px-3 py-1 text-xs bg-indigo-800 text-indigo-100 rounded-full hover:bg-indigo-700 transition-colors flex items-center gap-1"
+                >
+                  🏠 Home
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
