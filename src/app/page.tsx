@@ -226,12 +226,14 @@ export default function Home() {
   const robotRef = useRef<RobotControllerRef>(null);
   const skyIslandRef = useRef<SkyIslandRef>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textInputRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const realtimePeerRef = useRef<RTCPeerConnection | null>(null);
   const realtimeDataChannelRef = useRef<RTCDataChannel | null>(null);
   const realtimeMediaStreamRef = useRef<MediaStream | null>(null);
   const realtimeRemoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const realtimeAssistantTranscriptRef = useRef('');
+  const realtimeSessionGenerationRef = useRef(0);
   
   // Refs to avoid stale closures in async callbacks (voice transcription)
   const currentWorldRef = useRef(currentWorld);
@@ -264,6 +266,8 @@ export default function Home() {
   }, []);
 
   const stopRealtimeSession = useCallback(() => {
+    realtimeSessionGenerationRef.current += 1;
+
     realtimeDataChannelRef.current?.close();
     realtimeDataChannelRef.current = null;
 
@@ -902,6 +906,8 @@ export default function Home() {
     if (realtimePeerRef.current || isRealtimeConnecting) return;
 
     setIsRealtimeConnecting(true);
+    const sessionGeneration = realtimeSessionGenerationRef.current + 1;
+    realtimeSessionGenerationRef.current = sessionGeneration;
 
     try {
       const pc = new RTCPeerConnection();
@@ -924,13 +930,11 @@ export default function Home() {
       const dataChannel = pc.createDataChannel('oai-events');
       realtimeDataChannelRef.current = dataChannel;
       dataChannel.addEventListener('open', () => {
+        if (realtimeSessionGenerationRef.current !== sessionGeneration) return;
         setIsRealtimeConnected(true);
         setIsRealtimeConnecting(false);
       });
-      dataChannel.addEventListener('close', () => {
-        setIsRealtimeConnected(false);
-        setIsRecording(false);
-      });
+      dataChannel.addEventListener('close', () => stopRealtimeSession());
       dataChannel.addEventListener('message', (message) => {
         try {
           handleRealtimeServerEvent(JSON.parse(message.data));
@@ -961,28 +965,70 @@ export default function Home() {
         throw new Error(errorText || 'Failed to create Realtime session');
       }
 
+      if (
+        realtimeSessionGenerationRef.current !== sessionGeneration ||
+        realtimePeerRef.current !== pc
+      ) {
+        return;
+      }
+
       await pc.setRemoteDescription({
         type: 'answer',
         sdp: await response.text(),
       });
     } catch (error) {
       console.error('Realtime connection error:', error);
+      const wasCurrentSession =
+        realtimeSessionGenerationRef.current === sessionGeneration;
       stopRealtimeSession();
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: 'Sorry, I had trouble starting live voice. Please try again.',
-      }]);
+      if (wasCurrentSession) {
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: 'Sorry, I had trouble starting live voice. Please try again.',
+        }]);
+      }
     }
   }, [handleRealtimeServerEvent, isRealtimeConnecting, stopRealtimeSession]);
 
-  const toggleRecording = async () => {
+  const toggleRealtimeMicrophone = useCallback(async () => {
     if (isRealtimeConnected || isRealtimeConnecting) {
       stopRealtimeSession();
       return;
     }
 
     await startRealtimeSession();
-  };
+  }, [
+    isRealtimeConnected,
+    isRealtimeConnecting,
+    startRealtimeSession,
+    stopRealtimeSession,
+  ]);
+
+  useEffect(() => {
+    const isInteractiveTextTarget = (target: EventTarget | null) => {
+      if (!(target instanceof HTMLElement)) return false;
+
+      const tagName = target.tagName.toLowerCase();
+      return (
+        target.isContentEditable ||
+        tagName === 'input' ||
+        tagName === 'textarea' ||
+        tagName === 'select' ||
+        tagName === 'button'
+      );
+    };
+
+    const handleSpaceToggle = (event: KeyboardEvent) => {
+      if (event.code !== 'Space' || event.repeat) return;
+      if (isInteractiveTextTarget(event.target)) return;
+
+      event.preventDefault();
+      void toggleRealtimeMicrophone();
+    };
+
+    window.addEventListener('keydown', handleSpaceToggle);
+    return () => window.removeEventListener('keydown', handleSpaceToggle);
+  }, [toggleRealtimeMicrophone]);
 
   // Handle form submit
   const handleSubmit = (e: React.FormEvent) => {
@@ -1131,6 +1177,7 @@ export default function Home() {
         <div className="p-4 border-t border-[#0f3460]">
           <form onSubmit={handleSubmit} className="flex gap-2">
             <input
+              ref={textInputRef}
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -1138,35 +1185,7 @@ export default function Home() {
               className="flex-1 bg-[#0f3460] text-white rounded-full px-4 py-2 outline-none focus:ring-2 focus:ring-[#e94560] placeholder-gray-500"
               disabled={isLoading || isRealtimeConnecting}
             />
-            
-            {/* Voice Record Button */}
-            <button
-              type="button"
-              onClick={toggleRecording}
-              disabled={isRealtimeConnecting}
-              title={isRealtimeConnected ? 'Stop live voice' : 'Start live voice'}
-              className={`w-10 h-10 rounded-full flex items-center justify-center transition-all ${
-                isRecording
-                  ? 'bg-red-500 animate-pulse'
-                  : isRealtimeConnecting
-                  ? 'bg-yellow-500'
-                  : isRealtimeConnected
-                  ? 'bg-green-600 hover:bg-green-500'
-                  : 'bg-[#0f3460] hover:bg-[#1a4a7a]'
-              }`}
-            >
-              {isRealtimeConnecting ? (
-                <svg className="w-5 h-5 text-white animate-spin" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                </svg>
-              ) : (
-                <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1 1.93c-3.94-.49-7-3.85-7-7.93h2c0 3.31 2.69 6 6 6s6-2.69 6-6h2c0 4.08-3.06 7.44-7 7.93V20h4v2H8v-2h4v-4.07z" />
-                </svg>
-              )}
-            </button>
-            
+
             {/* Send Button */}
             <button
               type="submit"
@@ -1178,6 +1197,35 @@ export default function Home() {
               </svg>
             </button>
           </form>
+
+          <div
+            className={`mt-3 flex items-center gap-2 rounded-lg border px-3 py-2 text-xs ${
+              isRealtimeConnecting
+                ? 'border-yellow-500/40 bg-yellow-500/10 text-yellow-200'
+                : isRealtimeConnected
+                ? 'border-green-500/40 bg-green-500/10 text-green-200'
+                : 'border-red-500/30 bg-red-500/10 text-red-200'
+            }`}
+          >
+            <span
+              className={`h-2.5 w-2.5 rounded-full ${
+                isRealtimeConnecting
+                  ? 'bg-yellow-300 animate-pulse'
+                  : isRealtimeConnected
+                  ? isRecording
+                    ? 'bg-red-400 animate-pulse'
+                    : 'bg-green-400'
+                  : 'bg-red-400'
+              }`}
+            />
+            <span>
+              {isRealtimeConnecting
+                ? 'Connecting microphone...'
+                : isRealtimeConnected
+                ? 'Microphone enabled - press Space to disable'
+                : 'Press Space to enable microphone'}
+            </span>
+          </div>
           
           {/* Quick Commands */}
           <div className="mt-3 flex flex-wrap gap-2">
