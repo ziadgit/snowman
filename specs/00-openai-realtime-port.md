@@ -20,6 +20,19 @@ Port the app away from Mistral runtime APIs and add an OpenAI Realtime voice pat
 - UI copy must not mention non-OpenAI voice providers. The typed-chat speech checkbox is labeled as OpenAI voice.
 - System instructions must tell the model that it controls a visible embodied avatar and can perform supported avatar actions. For supported commands like jump, wave, dance, and walk, the model must not claim it cannot perform the action.
 - Physical action responses include short asterisk action cues (`*jumps*`, `*waves*`, `*dances*`, etc.) so the existing action parser can drive the avatar.
+- README is minimal and current-runtime focused. It must not mention Mistral, ElevenLabs, or Finestral; it should describe Aquarius and the OpenAI APIs used by this app.
+
+## README Contract
+
+- Title is `Aquarius`.
+- Keep the README concise: what the app is, what OpenAI APIs it uses, local setup, env vars, and commands.
+- Do not include historical hackathon/provider/fine-tuning narrative.
+- Mention OpenAI APIs where used:
+  - Realtime API for live browser voice over WebRTC.
+  - Responses API for typed chat and web-search-backed news/astrology.
+  - Audio Speech for typed-chat voice playback.
+  - Audio Transcriptions as the request-based transcription fallback.
+- Env examples include `OPENAI_API_KEY` plus optional OpenAI model/voice overrides only.
 
 ## Realtime Voice Control
 
