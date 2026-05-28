@@ -1,4 +1,4 @@
-# Finestral
+# Snowman
 
 > A mental health indie game that detects burnout through your voice -- not your words -- and responds with physical actions, not paragraphs.
 
