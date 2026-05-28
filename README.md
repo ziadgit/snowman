@@ -2,7 +2,7 @@
 
 > A mental health indie game that detects burnout through your voice -- not your words -- and responds with physical actions, not paragraphs.
 
-### **[Try the live demo](https://aquariusbot.vercel.app/)** | Runtime ported to OpenAI Realtime
+### **[Try the live demo](https://snowman-taupe.vercel.app/)** | Runtime ported to OpenAI Realtime
 
 ![Next.js](https://img.shields.io/badge/Next.js-16-black) ![OpenAI](https://img.shields.io/badge/OpenAI-Realtime-111111) ![Three.js](https://img.shields.io/badge/Three.js-3D-049ef4) ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6)
 
