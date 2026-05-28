@@ -39,11 +39,12 @@ Port the app away from Mistral runtime APIs and add an OpenAI Realtime voice pat
 ### Spacebar Microphone Toggle
 
 - The UI does not render a microphone button.
-- The input area shows a concise status/control line: `Press Space to enable microphone` when disabled and `Microphone enabled - press Space to disable` when enabled.
+- The input area shows a concise status/control line: `Press Space or T to enable microphone` when disabled and `Microphone enabled - press Space or T to disable` when enabled.
 - The status line also shows a clear enabled/disabled visual state, such as a green/red dot or badge.
-- Pressing Space toggles the microphone only when the text input is not focused and no modal/interactive text control is active.
+- Pressing Space or T toggles the microphone only when the text input is not focused and no modal/interactive text control is active.
 - Toggling on opens a live WebRTC session and enables microphone capture.
-- Toggling off closes the Realtime session, stops microphone tracks, and updates status immediately.
+- Toggling off disables the local microphone track and updates status immediately without closing the Realtime session or interrupting an in-progress assistant response.
+- The Realtime session only fully closes on connection close/error, page unmount, or an explicit teardown path.
 - The UI must distinguish transient connection state from enabled state, e.g. `Connecting...`.
 - The visible state must stay accurate if the Realtime data channel closes or the session errors.
 
@@ -53,6 +54,10 @@ Port the app away from Mistral runtime APIs and add an OpenAI Realtime voice pat
 - Session config sets `audio.input.turn_detection.type` to `server_vad`.
 - User transcript bubbles come from `conversation.item.input_audio_transcription.completed`.
 - Assistant bubbles come from `response.output_audio_transcript.done`.
+- Spoken local commands are dispatched through the same local handlers as command buttons.
+- A spoken local command suppresses/cancels the model response for that same utterance so command feedback and assistant speech do not overlap.
+- Saying `warp secret` or another secret-world warp phrase enters Sky Island.
+- In Sky Island, saying `magic`, `collect`, `left`, `right`, `forward`, or supported home phrases performs the same action as the matching quick-command button.
 
 ### Push To Talk
 
@@ -75,9 +80,9 @@ Port the app away from Mistral runtime APIs and add an OpenAI Realtime voice pat
 - Realtime: `OPENAI_REALTIME_MODEL` or `gpt-realtime-2`.
 - Text/search: `OPENAI_TEXT_MODEL` or `gpt-5.5`.
 - Audio transcription: `OPENAI_TRANSCRIBE_MODEL` or `gpt-4o-transcribe`.
-- Realtime voice: `OPENAI_REALTIME_VOICE` or `marin`.
+- Realtime voice: `OPENAI_REALTIME_VOICE` or `echo`.
 - Request speech: `OPENAI_TTS_MODEL` or `gpt-4o-mini-tts`.
-- Request speech voice: `OPENAI_TTS_VOICE` or `marin`.
+- Request speech voice: `OPENAI_TTS_VOICE` or `echo`.
 
 ## Verification
 

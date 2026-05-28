@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Aquarius",
-  description: "A fin-astral ministral bot that helps you feel fine",
+  description: "A realtime-ish bot that embodies its voice",
 };
 
 export default function RootLayout({

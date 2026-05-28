@@ -208,6 +208,7 @@ export default function Home() {
   const [isRecording, setIsRecording] = useState(false);
   const [isRealtimeConnecting, setIsRealtimeConnecting] = useState(false);
   const [isRealtimeConnected, setIsRealtimeConnected] = useState(false);
+  const [isRealtimeMicrophoneEnabled, setIsRealtimeMicrophoneEnabled] = useState(false);
   const [currentEmotion, setCurrentEmotion] = useState<Emotion | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
@@ -234,6 +235,9 @@ export default function Home() {
   const realtimeRemoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const realtimeAssistantTranscriptRef = useRef('');
   const realtimeSessionGenerationRef = useRef(0);
+  const realtimeResponseInProgressRef = useRef(false);
+  const suppressRealtimeAssistantResponseRef = useRef(false);
+  const suppressRealtimeResponseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   
   // Refs to avoid stale closures in async callbacks (voice transcription)
   const currentWorldRef = useRef(currentWorld);
@@ -265,8 +269,60 @@ export default function Home() {
     };
   }, []);
 
+  const setRealtimeMicrophoneCapture = useCallback((enabled: boolean) => {
+    realtimeMediaStreamRef.current?.getAudioTracks().forEach((track) => {
+      track.enabled = enabled;
+    });
+
+    setIsRealtimeMicrophoneEnabled(enabled);
+    if (!enabled) {
+      setIsRecording(false);
+    }
+  }, []);
+
+  const clearRealtimeResponseSuppression = useCallback(() => {
+    suppressRealtimeAssistantResponseRef.current = false;
+    if (suppressRealtimeResponseTimeoutRef.current) {
+      clearTimeout(suppressRealtimeResponseTimeoutRef.current);
+      suppressRealtimeResponseTimeoutRef.current = null;
+    }
+  }, []);
+
+  const sendRealtimeClientEvent = useCallback((event: Record<string, unknown>) => {
+    const dataChannel = realtimeDataChannelRef.current;
+    if (!dataChannel || dataChannel.readyState !== 'open') return;
+
+    dataChannel.send(JSON.stringify(event));
+  }, []);
+
+  const cancelRealtimeAssistantResponse = useCallback(() => {
+    if (!realtimeResponseInProgressRef.current) return;
+
+    sendRealtimeClientEvent({ type: 'response.cancel' });
+    sendRealtimeClientEvent({ type: 'output_audio_buffer.clear' });
+    realtimeAssistantTranscriptRef.current = '';
+    setIsLoading(false);
+    setIsSpeaking(false);
+  }, [sendRealtimeClientEvent]);
+
+  const suppressRealtimeAssistantResponse = useCallback(() => {
+    suppressRealtimeAssistantResponseRef.current = true;
+    if (suppressRealtimeResponseTimeoutRef.current) {
+      clearTimeout(suppressRealtimeResponseTimeoutRef.current);
+    }
+
+    suppressRealtimeResponseTimeoutRef.current = setTimeout(() => {
+      suppressRealtimeAssistantResponseRef.current = false;
+      suppressRealtimeResponseTimeoutRef.current = null;
+    }, 3000);
+
+    cancelRealtimeAssistantResponse();
+  }, [cancelRealtimeAssistantResponse]);
+
   const stopRealtimeSession = useCallback(() => {
     realtimeSessionGenerationRef.current += 1;
+    clearRealtimeResponseSuppression();
+    realtimeResponseInProgressRef.current = false;
 
     realtimeDataChannelRef.current?.close();
     realtimeDataChannelRef.current = null;
@@ -288,11 +344,12 @@ export default function Home() {
 
     realtimeAssistantTranscriptRef.current = '';
     setIsRecording(false);
+    setIsRealtimeMicrophoneEnabled(false);
     setIsSpeaking(false);
     setIsRealtimeConnected(false);
     setIsRealtimeConnecting(false);
     setIsLoading(false);
-  }, []);
+  }, [clearRealtimeResponseSuppression]);
 
   useEffect(() => stopRealtimeSession, [stopRealtimeSession]);
 
@@ -380,8 +437,11 @@ export default function Home() {
     setFadeDirection('in');
     
     setTimeout(() => {
+      currentWorldRef.current = 'skyIsland';
+      const initialGameState = createInitialGameState();
+      gameStateRef.current = initialGameState;
       setCurrentWorld('skyIsland');
-      setGameState(createInitialGameState());
+      setGameState(initialGameState);
       setFadeDirection('out');
       
       setTimeout(() => {
@@ -405,6 +465,8 @@ export default function Home() {
     setFadeDirection('in');
     
     setTimeout(() => {
+      currentWorldRef.current = 'main';
+      gameStateRef.current = null;
       setCurrentWorld('main');
       setGameState(null);
       setFadeDirection('out');
@@ -424,12 +486,13 @@ export default function Home() {
 
   // Handle game commands in Sky Island
   const handleGameCommand = useCallback((text: string) => {
-    if (!gameState) return false;
+    const currentGameState = gameStateRef.current;
+    if (!currentGameState) return false;
     
     const command = detectGameCommand(text);
     if (!command) return false;
     
-    let newGameState = gameState;
+    let newGameState = currentGameState;
     let responseMessage = '';
     
     switch (command) {
@@ -437,7 +500,7 @@ export default function Home() {
       case 'right':
       case 'forward':
       case 'back':
-        newGameState = moveRobot(gameState, command);
+        newGameState = moveRobot(currentGameState, command);
         responseMessage = GAME_MESSAGES.moving;
         if (skyIslandRef.current) {
           skyIslandRef.current.playAnimation('a_Walking');
@@ -445,7 +508,7 @@ export default function Home() {
         break;
         
       case 'magic':
-        newGameState = magicMoveToOrb(gameState);
+        newGameState = magicMoveToOrb(currentGameState);
         responseMessage = GAME_MESSAGES.magic;
         if (skyIslandRef.current) {
           skyIslandRef.current.playAnimation('a_Walking');
@@ -453,16 +516,15 @@ export default function Home() {
         break;
         
       case 'collect':
-        const collectableOrb = getCollectableOrb(gameState);
+        const collectableOrb = getCollectableOrb(currentGameState);
         if (collectableOrb) {
-          newGameState = collectOrb(gameState, collectableOrb.id);
+          newGameState = collectOrb(currentGameState, collectableOrb.id);
           playCollectSound();
           
           if (newGameState.completed) {
             responseMessage = GAME_MESSAGES.allCollected;
             // Award XP bonus
-            const newTideState = updateTideState(tideState, 50, 'excited');
-            setTideState(newTideState);
+            setTideState(prev => updateTideState(prev, 50, 'excited'));
             setTideAnimating(true);
             setTimeout(() => setTideAnimating(false), 700);
             
@@ -483,6 +545,7 @@ export default function Home() {
         break;
     }
     
+    gameStateRef.current = newGameState;
     setGameState(newGameState);
     
     // Check if near an orb after moving
@@ -504,44 +567,51 @@ export default function Home() {
     }
     
     return true;
-  }, [gameState, tideState, speakText]);
+  }, [speakText]);
+
+  const dispatchLocalCommand = useCallback((
+    text: string,
+    options: { recordUserMessage?: boolean; clearInput?: boolean } = {}
+  ) => {
+    const recordUserMessage = options.recordUserMessage ?? false;
+    const clearInput = options.clearInput ?? false;
+    const addUserMessage = () => {
+      if (recordUserMessage) {
+        setMessages(prev => [...prev, { role: 'user', content: text }]);
+      }
+      if (clearInput) {
+        setInput('');
+      }
+    };
+
+    if (isWarpSecretCommand(text)) {
+      addUserMessage();
+      warpToSkyIsland();
+      return true;
+    }
+
+    const currentWorldValue = currentWorldRef.current;
+    const gameStateValue = gameStateRef.current;
+
+    if (isWarpHomeCommand(text) && currentWorldValue === 'skyIsland') {
+      addUserMessage();
+      warpHome();
+      return true;
+    }
+
+    if (currentWorldValue === 'skyIsland' && gameStateValue && detectGameCommand(text)) {
+      addUserMessage();
+      return handleGameCommand(text);
+    }
+
+    return false;
+  }, [handleGameCommand, warpHome, warpToSkyIsland]);
 
   // Send message to chat API
   const sendMessage = async (text: string, emotion: Emotion | null = null) => {
     if (!text.trim() || isLoading) return;
 
-    // Check for warp commands first (highest priority)
-    if (isWarpSecretCommand(text)) {
-      const userMessage: Message = { role: 'user', content: text };
-      setMessages(prev => [...prev, userMessage]);
-      setInput('');
-      warpToSkyIsland();
-      return;
-    }
-    
-    // Use refs to get fresh state values (avoids stale closures in async callbacks)
-    const currentWorldValue = currentWorldRef.current;
-    const gameStateValue = gameStateRef.current;
-    
-    if (isWarpHomeCommand(text) && currentWorldValue === 'skyIsland') {
-      const userMessage: Message = { role: 'user', content: text };
-      setMessages(prev => [...prev, userMessage]);
-      setInput('');
-      warpHome();
-      return;
-    }
-    
-    // Handle game commands when in Sky Island
-    if (currentWorldValue === 'skyIsland' && gameStateValue) {
-      const userMessage: Message = { role: 'user', content: text };
-      setMessages(prev => [...prev, userMessage]);
-      setInput('');
-      
-      const handled = handleGameCommand(text);
-      if (handled) return;
-      
-      // If not a game command, still allow chat but with a game-aware response
-    }
+    if (dispatchLocalCommand(text, { recordUserMessage: true, clearInput: true })) return;
 
     const userMessage: Message = { 
       role: 'user', 
@@ -858,20 +928,35 @@ export default function Home() {
           role: 'user',
           content: transcript,
         }]);
-        animateRobot(null, transcript);
+        if (dispatchLocalCommand(transcript)) {
+          suppressRealtimeAssistantResponse();
+        } else {
+          animateRobot(null, transcript);
+        }
         break;
       }
       case 'response.created':
+        realtimeResponseInProgressRef.current = true;
+        realtimeAssistantTranscriptRef.current = '';
+        if (suppressRealtimeAssistantResponseRef.current) {
+          cancelRealtimeAssistantResponse();
+          break;
+        }
         setIsLoading(true);
         setIsSpeaking(true);
-        realtimeAssistantTranscriptRef.current = '';
         break;
       case 'response.output_audio_transcript.delta':
+        if (suppressRealtimeAssistantResponseRef.current) break;
         if (typeof event.delta === 'string') {
           realtimeAssistantTranscriptRef.current += event.delta;
         }
         break;
       case 'response.output_audio_transcript.done': {
+        if (suppressRealtimeAssistantResponseRef.current) {
+          realtimeAssistantTranscriptRef.current = '';
+          break;
+        }
+
         const transcript = (
           typeof event.transcript === 'string'
             ? event.transcript
@@ -891,16 +976,29 @@ export default function Home() {
         break;
       }
       case 'response.done':
+        realtimeResponseInProgressRef.current = false;
+        clearRealtimeResponseSuppression();
+        realtimeAssistantTranscriptRef.current = '';
         setIsLoading(false);
         setIsSpeaking(false);
         break;
       case 'error':
         console.error('Realtime API error:', event);
+        realtimeResponseInProgressRef.current = false;
+        clearRealtimeResponseSuppression();
+        realtimeAssistantTranscriptRef.current = '';
         setIsLoading(false);
         setIsSpeaking(false);
         break;
     }
-  }, [animateRobot, applyAssistantAnimation]);
+  }, [
+    animateRobot,
+    applyAssistantAnimation,
+    cancelRealtimeAssistantResponse,
+    clearRealtimeResponseSuppression,
+    dispatchLocalCommand,
+    suppressRealtimeAssistantResponse,
+  ]);
 
   const startRealtimeSession = useCallback(async () => {
     if (realtimePeerRef.current || isRealtimeConnecting) return;
@@ -933,6 +1031,7 @@ export default function Home() {
         if (realtimeSessionGenerationRef.current !== sessionGeneration) return;
         setIsRealtimeConnected(true);
         setIsRealtimeConnecting(false);
+        setRealtimeMicrophoneCapture(true);
       });
       dataChannel.addEventListener('close', () => stopRealtimeSession());
       dataChannel.addEventListener('message', (message) => {
@@ -988,11 +1087,21 @@ export default function Home() {
         }]);
       }
     }
-  }, [handleRealtimeServerEvent, isRealtimeConnecting, stopRealtimeSession]);
+  }, [
+    handleRealtimeServerEvent,
+    isRealtimeConnecting,
+    setRealtimeMicrophoneCapture,
+    stopRealtimeSession,
+  ]);
 
   const toggleRealtimeMicrophone = useCallback(async () => {
-    if (isRealtimeConnected || isRealtimeConnecting) {
+    if (isRealtimeConnecting) {
       stopRealtimeSession();
+      return;
+    }
+
+    if (isRealtimeConnected) {
+      setRealtimeMicrophoneCapture(!isRealtimeMicrophoneEnabled);
       return;
     }
 
@@ -1000,6 +1109,8 @@ export default function Home() {
   }, [
     isRealtimeConnected,
     isRealtimeConnecting,
+    isRealtimeMicrophoneEnabled,
+    setRealtimeMicrophoneCapture,
     startRealtimeSession,
     stopRealtimeSession,
   ]);
@@ -1018,16 +1129,16 @@ export default function Home() {
       );
     };
 
-    const handleSpaceToggle = (event: KeyboardEvent) => {
-      if (event.code !== 'Space' || event.repeat) return;
+    const handleTalkToggle = (event: KeyboardEvent) => {
+      if (!['Space', 'KeyT'].includes(event.code) || event.repeat) return;
       if (isInteractiveTextTarget(event.target)) return;
 
       event.preventDefault();
       void toggleRealtimeMicrophone();
     };
 
-    window.addEventListener('keydown', handleSpaceToggle);
-    return () => window.removeEventListener('keydown', handleSpaceToggle);
+    window.addEventListener('keydown', handleTalkToggle);
+    return () => window.removeEventListener('keydown', handleTalkToggle);
   }, [toggleRealtimeMicrophone]);
 
   // Handle form submit
@@ -1099,7 +1210,7 @@ export default function Home() {
         {/* Header */}
         <div className="p-4 border-b border-[#0f3460]">
           <h1 className="text-2xl font-bold text-[#e94560]">Aquarius</h1>
-          <p className="text-gray-400 text-sm">A fin-astral companion that helps you feel fine</p>
+          <p className="text-gray-400 text-sm">A realtime-ish bot that embodies its voice</p>
           
           {/* Tide Progress - Mindful XP Visualization */}
           <TideProgress 
@@ -1202,7 +1313,7 @@ export default function Home() {
             className={`mt-3 flex items-center gap-2 rounded-lg border px-3 py-2 text-xs ${
               isRealtimeConnecting
                 ? 'border-yellow-500/40 bg-yellow-500/10 text-yellow-200'
-                : isRealtimeConnected
+                : isRealtimeConnected && isRealtimeMicrophoneEnabled
                 ? 'border-green-500/40 bg-green-500/10 text-green-200'
                 : 'border-red-500/30 bg-red-500/10 text-red-200'
             }`}
@@ -1211,7 +1322,7 @@ export default function Home() {
               className={`h-2.5 w-2.5 rounded-full ${
                 isRealtimeConnecting
                   ? 'bg-yellow-300 animate-pulse'
-                  : isRealtimeConnected
+                  : isRealtimeConnected && isRealtimeMicrophoneEnabled
                   ? isRecording
                     ? 'bg-red-400 animate-pulse'
                     : 'bg-green-400'
@@ -1221,9 +1332,9 @@ export default function Home() {
             <span>
               {isRealtimeConnecting
                 ? 'Connecting microphone...'
-                : isRealtimeConnected
-                ? 'Microphone enabled - press Space to disable'
-                : 'Press Space to enable microphone'}
+                : isRealtimeConnected && isRealtimeMicrophoneEnabled
+                ? 'Microphone enabled - press Space or T to disable'
+                : 'Press Space or T to enable microphone'}
             </span>
           </div>
           

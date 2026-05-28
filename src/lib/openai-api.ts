@@ -8,9 +8,9 @@ export const OPENAI_REALTIME_MODEL =
 export const OPENAI_TRANSCRIBE_MODEL =
   process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-transcribe";
 export const OPENAI_REALTIME_VOICE =
-  process.env.OPENAI_REALTIME_VOICE || "marin";
+  process.env.OPENAI_REALTIME_VOICE || "echo";
 export const OPENAI_TTS_MODEL = process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts";
-export const OPENAI_TTS_VOICE = process.env.OPENAI_TTS_VOICE || "marin";
+export const OPENAI_TTS_VOICE = process.env.OPENAI_TTS_VOICE || "echo";
 
 export interface Citation {
   title: string;

@@ -14,6 +14,7 @@ const WARP_SECRET_KEYWORDS = [
   'take me to the secret',
   'go to secret',
   'secret world',
+  'warp world',
   'sky island',
   'take me to sky island',
 ];
