@@ -14,7 +14,7 @@ Prioritized backlog. Each item should map to `specs/`.
 ## Discovered
 
 - [x] P0 — Fix `/api/realtime/call` multipart proxy so OpenAI receives required `sdp` and `session` form fields — spec: `specs/00-openai-realtime-port.md`
-- [ ] P0 — Rewrite README as a minimal Aquarius/OpenAI README and remove all mentions of Mistral, ElevenLabs, and Finestral — spec: `specs/00-openai-realtime-port.md`
+- [x] P0 — Rewrite README as a minimal Aquarius/OpenAI README and remove all mentions of Mistral, ElevenLabs, and Finestral — spec: `specs/00-openai-realtime-port.md`
 - [ ] P0 — Replace the mic button with Spacebar microphone toggle UI, including enabled/disabled/connecting status and no button-rendered microphone control — spec: `specs/00-openai-realtime-port.md`
 - [ ] P1 — Add optional Realtime push-to-talk mode with VAD disabled, press/release controls, and explicit `input_audio_buffer.commit` + `response.create` flow — spec: `specs/00-openai-realtime-port.md`
 - [x] P1 — Pin Next Turbopack root in `next.config.ts` to remove parent-lockfile workspace warning during `npm run dev` — spec: `specs/00-openai-realtime-port.md`
