@@ -223,4 +223,4 @@ Open [http://localhost:3000](http://localhost:3000). Click the mic. Talk to Fine
 
 ## Team
 
-Built by [Ziad](https://github.com/ziadgit) and [Hannah](https://github.com/yanhann10) at the Mistral SF Hackathon.
+Built by [Ziad](https://github.com/ziadgit) and [Hannah](https://github.com/yanhann10)
